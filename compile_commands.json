@@ -1,0 +1,53 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-Iinc",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-pthread",
+      "-c",
+      "-o",
+      "obj/http_conn.o",
+      "src/http_conn.cpp"
+    ],
+    "directory": "/home/lance/sources/webserver",
+    "file": "/home/lance/sources/webserver/src/http_conn.cpp",
+    "output": "/home/lance/sources/webserver/obj/http_conn.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-Iinc",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-pthread",
+      "-c",
+      "-o",
+      "obj/parser.o",
+      "src/parser.cpp"
+    ],
+    "directory": "/home/lance/sources/webserver",
+    "file": "/home/lance/sources/webserver/src/parser.cpp",
+    "output": "/home/lance/sources/webserver/obj/parser.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-Iinc",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-pthread",
+      "-c",
+      "-o",
+      "obj/server.o",
+      "src/server.cpp"
+    ],
+    "directory": "/home/lance/sources/webserver",
+    "file": "/home/lance/sources/webserver/src/server.cpp",
+    "output": "/home/lance/sources/webserver/obj/server.o"
+  }
+]

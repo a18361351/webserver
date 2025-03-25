@@ -1,0 +1,9 @@
+# vscode cache
+.vscode
+
+# clangd
+.cache
+
+misc/
+obj/
+bin/
