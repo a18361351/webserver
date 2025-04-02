@@ -2,6 +2,9 @@
 #ifndef THREAD_POOL_HEADER
 #define THREAD_POOL_HEADER
 
+// 线程池
+
+#include <cstdint>
 #include <list>
 #include <cstdio>
 #include <exception>
@@ -21,8 +24,8 @@ private:
     static void* worker(void* arg);
     void run();
 
-    int m_thread_number;    // 线程池中的线程数
-    int m_max_requests;     // 队列中允许的最大请求数
+    uint32_t m_thread_number;    // 线程池中的线程数
+    uint32_t m_max_requests;     // 队列中允许的最大请求数
     pthread_t* m_threads;   // 描述线程池的数组，其大小为m_thread_number
     std::list<T*> m_workqueue;  // 队列
     locker m_qlock;         // 对请求队列的互斥锁

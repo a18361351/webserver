@@ -106,7 +106,6 @@ private:
     char* m_host;
     int m_content_length;
     bool m_linger;
-    bool m_conn_closed;
 
     char* m_file_address;
     struct stat m_file_stat;

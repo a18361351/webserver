@@ -4,5 +4,3 @@ CompileFlags:
     - "-isystem/usr/include/c++/11"  # 显式指定 GCC 的 C++ 头文件路径（需替换为你的 GCC 版本）
     - "-isystem/usr/include/x86_64-linux-gnu/c++/11"  # 平台相关头文件路径（可选）
   
-  QueryDriver: 
-    - "/usr/bin/g++"  # 指定 GCC 路径

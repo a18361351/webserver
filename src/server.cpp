@@ -10,9 +10,24 @@
 #include <cassert>
 #include <sys/epoll.h>
 
-#include "locker.h"
 #include "thread_pool.h"
 #include "http_conn.h"
+
+#define DEBUG_PRINT
+
+#ifdef DEBUG_PRINT
+#define DPRINT(fmt, ...) \
+    do {\
+    printf("%s:%d %s()>" fmt "\n", \
+    (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__), \
+    __LINE__, \
+    __func__, \
+    ##__VA_ARGS__); \
+    } while (0)
+#else
+#define DPRINT(fmt, ...) ((void)0)
+#endif
+
 
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
@@ -32,7 +47,7 @@ void addsig(int sig, void(handler)(int), bool restart = true) {
 }
 
 void show_error(int connfd, const char* info) {
-    printf("%s", info);
+    DPRINT("%s", info);
     send(connfd, info, strlen(info), 0);
     close(connfd);
 }
@@ -62,14 +77,14 @@ int main(int argc, char* argv[]) {
     try {
         pool = new ThreadPool<HTTPConn>;
     } catch (...) {
-        printf("Unable to init thread pool.\n");
+        DPRINT("Unable to init thread pool.");
         return 1;
     }
 
     // 为每个可能的客户都预先分配一个HTTPConn对象
     HTTPConn* users = new HTTPConn[MAX_FD];
     assert(users);
-    int user_count = 0;
+    // int user_count = 0;
 
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd >= 0);
@@ -98,7 +113,7 @@ int main(int argc, char* argv[]) {
     while (true) {
         int number = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
         if ((number < 0) && (errno != EINTR)) {
-            printf("epoll failure");
+            DPRINT("epoll failure");
             break;
         }
         for (int i = 0; i < number; i++) {
@@ -115,19 +130,22 @@ int main(int argc, char* argv[]) {
                     show_error(connfd, "Internal server busy");
                     continue;
                 }
-                printf("New connection incoming\n");
+                DPRINT("[%d]New connection incoming", connfd);
                 users[connfd].init(connfd, cli_addr);
             } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                 // 异常时直接关闭客户连接
+                    DPRINT("[%d]Error: closing connection", sockfd);
                 users[sockfd].close_conn();
             } else if (events[i].events & EPOLLIN) {
                 if (users[sockfd].read()) {
                     pool->append(users + sockfd);
                 } else {
+                    DPRINT("[%d]Read error: closing connection", sockfd);
                     users[sockfd].close_conn();
                 }
             } else if (events[i].events & EPOLLOUT) {
                 if (!users[sockfd].write()) {
+                    DPRINT("[%d]Write done: closing connection", sockfd);
                     users[sockfd].close_conn();
                 }
             } else {
@@ -135,6 +153,7 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    DPRINT("Cleanup");
     close(epollfd);
     close(listenfd);
     delete[] users;

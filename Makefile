@@ -13,7 +13,6 @@ TARGET_PATH := $(BIN_DIR)/$(TARGET)  # 完整路径
 # 源文件列表（明确指定）
 SRCS := \
 	$(SRC_DIR)/http_conn.cpp \
-	$(SRC_DIR)/parser.cpp \
 	$(SRC_DIR)/server.cpp
 
 # 生成对应的目标文件列表

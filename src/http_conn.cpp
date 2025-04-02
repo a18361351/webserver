@@ -1,5 +1,21 @@
 #include "http_conn.h"
 #include <cstring>
+#include <strings.h>
+
+#define DEBUG_PRINT
+
+#ifdef DEBUG_PRINT
+#define DPRINT(fmt, ...) \
+    do {\
+    printf("%s:%d %s()>" fmt "\n", \
+    (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__), \
+    __LINE__, \
+    __func__, \
+    ##__VA_ARGS__); \
+    } while (0)
+#else
+#define DPRINT(fmt, ...) ((void)0)
+#endif
 
 const char* OK_200_TITLE = "OK";
 const char* ERROR_400_TITLE = "Bad Request";
@@ -12,6 +28,7 @@ const char* ERROR_500_TITLE = "Internal Server Error";
 const char* ERROR_500_FORM = "There was an unusual problem serving the requested file.\n";
 /* 网站的根目录 */
 const char* DOC_ROOT = "/var/www/html";
+
 
 int setnonblocking(int fd) {
     int old_option = fcntl(fd, F_GETFL);
@@ -66,7 +83,6 @@ void HTTPConn::init(int sockfd, const sockaddr_in& addr) {
 void HTTPConn::init() {
     m_check_state = CHECK_STATE_REQUESTLINE;
     m_linger = false;
-    m_conn_closed = false;
 
     m_method = GET;
     m_url = 0;
@@ -88,7 +104,6 @@ bool HTTPConn::read() {
         }
     
         int bytes_read = 0;
-        bool connection_closed = false;
     
         while (true) {
             bytes_read = recv(m_sockfd, m_read_buf + m_end_pos, READ_BUFFER_SIZE - m_end_pos, 0);
@@ -98,16 +113,13 @@ bool HTTPConn::read() {
                 }
                 return false;   // error
             } else if (bytes_read == 0) {
-                connection_closed = true;
-                break;
+                // 远端计算机关闭连接
+                DPRINT("[%d]Remote client closed", this->m_sockfd);
+                return false;
             }
             m_end_pos += bytes_read;
         }
     
-        // 添加成员变量标记连接已关闭
-        m_conn_closed = connection_closed;
-    
-        // 只要无错误发生，即使客户端关闭也返回true
         return true;
     
 }
@@ -209,9 +221,13 @@ HTTPConn::HTTP_CODE HTTPConn::parse_headers(char* text) {
     } else if (strncasecmp(text, "Connection:", 11) == 0) {
         // 连接方式
         text += 11;
-        text += strspn(text, "\t");
+        text += strspn(text, " \t");
         if (strcasecmp(text, "keep-alive") == 0) {
             m_linger = true;
+        } else if (strcasecmp(text, "close") == 0) {
+            m_linger = false;
+        } else {
+            return BAD_REQUEST; // unknown connection method
         }
     } else if (strncasecmp(text, "Content-Length:", 15) == 0) {
         text += 15;
@@ -347,6 +363,10 @@ bool HTTPConn::write() {
 
         if (bytes_remain <= 0) {
             // 根据Connection字段决定是否立即关闭连接
+            DPRINT("[%d]Bytes sent: %d", m_sockfd, bytes_sent);
+            if (bytes_remain < 0) {
+                DPRINT("!WARNING!Bytes sent not match");
+            }
             unmap();
             if (m_linger) {
                 init();
@@ -354,6 +374,7 @@ bool HTTPConn::write() {
                 return true;
             } else {
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
+                DPRINT("[%d]Connection: close", m_sockfd);
                 return false;
             }
         }
@@ -468,13 +489,10 @@ void HTTPConn::process() {
 
     bool write_ret = process_write(read_ret);
     if (!write_ret) {
+        // 无法写入
         close_conn();
     }
-    if (m_conn_closed) {    // 对方已经关闭连接
-        close_conn(true);   
-    } else {
-        modfd(m_epollfd, m_sockfd, EPOLLOUT);
-    }
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
 
 void HTTPConn::unmap(){
