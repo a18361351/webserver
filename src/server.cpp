@@ -13,7 +13,7 @@
 #include "thread_pool.h"
 #include "http_conn.h"
 
-#define DEBUG_PRINT
+// #define DEBUG_PRINT
 
 #ifdef DEBUG_PRINT
 #define DPRINT(fmt, ...) \
@@ -32,7 +32,7 @@
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
 
-extern int addfd(int epollfd, int fd, bool one_shot);
+extern void addfd(int epollfd, int fd, bool oneshot, int trig_mode = 1);
 extern int removefd(int epollfd, int fd);
 
 void addsig(int sig, void(handler)(int), bool restart = true) {
@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
 
     ThreadPool<HTTPConn>* pool = nullptr;
     try {
-        pool = new ThreadPool<HTTPConn>;
+        pool = new ThreadPool<HTTPConn>(8);
     } catch (...) {
         DPRINT("Unable to init thread pool.");
         return 1;
@@ -89,7 +89,9 @@ int main(int argc, char* argv[]) {
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd >= 0);
     struct linger tmp = {1, 0};
-    setsockopt(listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof(tmp));
+    int reuse = 1;
+    assert(setsockopt(listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof(tmp)) >= 0);
+    assert(setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) >= 0);
 
     int ret = 0;
     struct sockaddr_in address;
@@ -99,9 +101,13 @@ int main(int argc, char* argv[]) {
     address.sin_port = htons(port);
 
     ret = bind(listenfd, (struct sockaddr*)&address, sizeof(address));
-    assert(ret >= 0);
+    if (ret < 0) {
+        perror("Unable to bind port");
+        close(listenfd);
+        return -1;
+    }
 
-    ret = listen(listenfd, 10);
+    ret = listen(listenfd, 100);
     assert(ret >= 0);
 
     epoll_event events[MAX_EVENT_NUMBER];
@@ -119,22 +125,31 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < number; i++) {
             int sockfd = events[i].data.fd;
             if (sockfd == listenfd) {
-                struct sockaddr_in cli_addr;
-                socklen_t cli_addr_len = sizeof(cli_addr);
-                int connfd = accept(listenfd, (struct sockaddr*)&cli_addr, &cli_addr_len);
-                if (connfd < 0) {
-                    perror("Error in accept()");
-                    continue;
+                while (true) {
+                    struct sockaddr_in cli_addr;
+                    socklen_t cli_addr_len = sizeof(cli_addr);
+                    int connfd = accept(listenfd, (struct sockaddr*)&cli_addr, &cli_addr_len);
+                    if (connfd < 0) {
+                        if (errno == EAGAIN) {
+                            break;  // All fds get!
+                        }
+                        perror("Error in accept()");
+                        continue;
+                    }
+                    if (HTTPConn::m_user_count >= MAX_FD) {
+                        show_error(connfd, "Internal server busy");
+                        continue;
+                    }
+                    DPRINT("[%d]New connection incoming", connfd);
+                    users[connfd].init(connfd, cli_addr);
                 }
-                if (HTTPConn::m_user_count >= MAX_FD) {
-                    show_error(connfd, "Internal server busy");
-                    continue;
-                }
-                DPRINT("[%d]New connection incoming", connfd);
-                users[connfd].init(connfd, cli_addr);
-            } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
+            } else if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) {
+                // RDHUP/HUP事件，为远方关闭连接
+                DPRINT("[%d]RDHUP/HUP event, closing connection", sockfd);
+                users[sockfd].close_conn();
+            } else if (events[i].events & (EPOLLERR)) {
                 // 异常时直接关闭客户连接
-                    DPRINT("[%d]Error: closing connection", sockfd);
+                DPRINT("[%d]Error: closing connection, event = %u", sockfd, events[i].events);
                 users[sockfd].close_conn();
             } else if (events[i].events & EPOLLIN) {
                 if (users[sockfd].read()) {
@@ -146,7 +161,8 @@ int main(int argc, char* argv[]) {
             } else if (events[i].events & EPOLLOUT) {
                 if (!users[sockfd].write()) {
                     DPRINT("[%d]Write done: closing connection", sockfd);
-                    users[sockfd].close_conn();
+                    // users[sockfd].close_conn();
+                    users[sockfd].close_conn_write();
                 }
             } else {
                 // do nothing

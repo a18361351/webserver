@@ -54,6 +54,7 @@ public:
 
     void init(int sockfd, const sockaddr_in& addr);
     void close_conn(bool real_close = true);
+    void close_conn_write();
     void process();
     bool read();
     bool write();
@@ -87,7 +88,7 @@ public:
     static int m_user_count;
 
 private:
-    int m_sockfd;
+    int m_sockfd{-1};
     sockaddr_in m_address;
 
     char m_read_buf[READ_BUFFER_SIZE];
@@ -97,6 +98,7 @@ private:
 
     char m_write_buf[WRITE_BUFFER_SIZE];
     int m_write_idx;
+    int m_bytes_to_send;
     CHECK_STATE m_check_state;
     METHOD m_method;
 

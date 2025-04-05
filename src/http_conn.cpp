@@ -1,8 +1,13 @@
 #include "http_conn.h"
 #include <cstring>
+#include <exception>
 #include <strings.h>
+#include <string>
+#include <sys/socket.h>
 
-#define DEBUG_PRINT
+// Rewrite in 4/5
+
+// #define DEBUG_PRINT
 
 #ifdef DEBUG_PRINT
 #define DPRINT(fmt, ...) \
@@ -29,6 +34,30 @@ const char* ERROR_500_FORM = "There was an unusual problem serving the requested
 /* 网站的根目录 */
 const char* DOC_ROOT = "/var/www/html";
 
+std::string get_method_name(HTTPConn::METHOD method) {
+    switch (method) {
+        case HTTPConn::GET:
+            return "GET";
+        case HTTPConn::POST:
+            return "POST";
+        case HTTPConn::HEAD:
+            return "HEAD";
+        case HTTPConn::PUT:
+            return "PUT";
+        case HTTPConn::DELETE:
+            return "DELETE";
+        case HTTPConn::TRACE:
+            return "TRACE";
+        case HTTPConn::OPTIONS:
+            return "OPTIONS";
+        case HTTPConn::CONNECT:
+            return "CONNECT";
+        case HTTPConn::PATCH:
+            return "PATCH";
+        default:
+            return "UNKNOWN";
+    }
+}
 
 int setnonblocking(int fd) {
     int old_option = fcntl(fd, F_GETFL);
@@ -37,10 +66,17 @@ int setnonblocking(int fd) {
     return old_option;
 }
 
-void addfd(int epollfd, int fd, bool oneshot) {
+// oneshot: 是否启用EPOLLONESHOT选项
+// trig_mode: 选择LT工作模式(0)/ET工作模式(1)
+void addfd(int epollfd, int fd, bool oneshot, int trig_mode = 1) {
     epoll_event e;
     e.data.fd = fd;
-    e.events = EPOLLIN | EPOLLET;
+    if (trig_mode == 1) {
+        e.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+    } else {
+        // Only ET mode supported currently
+        throw std::exception();
+    }
     if (oneshot) {
         e.events |= EPOLLONESHOT;
     }
@@ -49,7 +85,7 @@ void addfd(int epollfd, int fd, bool oneshot) {
 }
 
 void removefd(int epollfd, int fd) {
-    assert(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0) != -1);
+    assert(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0) == 0);
     close(fd);
 }
 
@@ -65,9 +101,16 @@ int HTTPConn::m_epollfd = -1;
 
 void HTTPConn::close_conn(bool real_close) {
     if (real_close && (m_sockfd != -1)) {
+        DPRINT("[%d]Socket closed", m_sockfd);
         removefd(m_epollfd, m_sockfd);
         m_sockfd = -1;
         m_user_count--;
+    }
+}
+
+void HTTPConn::close_conn_write() {
+    if (m_sockfd != -1) {
+        shutdown(m_sockfd, SHUT_WR);
     }
 }
 
@@ -93,6 +136,7 @@ void HTTPConn::init() {
     m_cur_pos = 0;
     m_end_pos = 0;
     m_write_idx = 0;
+    m_bytes_to_send = 0;
     memset(m_read_buf, 0, READ_BUFFER_SIZE);
     memset(m_write_buf, 0, WRITE_BUFFER_SIZE);
     memset(m_real_file, 0, FILENAME_LEN);
@@ -102,24 +146,27 @@ bool HTTPConn::read() {
         if (m_end_pos >= READ_BUFFER_SIZE) {
             return false;
         }
-    
+        int bytes_read_total = 0;
         int bytes_read = 0;
     
         while (true) {
             bytes_read = recv(m_sockfd, m_read_buf + m_end_pos, READ_BUFFER_SIZE - m_end_pos, 0);
+            bytes_read_total += bytes_read == -1 ? 0 : bytes_read;
             if (bytes_read == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     break; // 正常结束循环
                 }
+                perror("Unable to read");
                 return false;   // error
             } else if (bytes_read == 0) {
                 // 远端计算机关闭连接
                 DPRINT("[%d]Remote client closed", this->m_sockfd);
+                DPRINT("[%d]Read %d bytes", m_sockfd, bytes_read_total);
                 return false;
             }
             m_end_pos += bytes_read;
         }
-    
+        DPRINT("[%d]Read %d bytes", m_sockfd, bytes_read_total);
         return true;
     
 }
@@ -341,7 +388,8 @@ HTTPConn::HTTP_CODE HTTPConn::do_request() {
 bool HTTPConn::write() {
     int temp = 0;
     int bytes_sent = 0;
-    int bytes_remain = m_write_idx;
+    int bytes_remain = m_bytes_to_send;
+    m_bytes_to_send = 0;
     if (bytes_remain == 0) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         init();
@@ -350,11 +398,13 @@ bool HTTPConn::write() {
 
     while (1) {
         temp = writev(m_sockfd, m_iv, m_iv_count);
-        if (temp <= -1) {
+        if (temp < 0) {
             if (errno == EAGAIN) {
+                // 没有缓冲区空间，等待下一轮事件
                 modfd(m_epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
+            DPRINT("[%d]Write error: %s", m_sockfd, strerror(errno));
             unmap();
             return false;
         }
@@ -365,7 +415,7 @@ bool HTTPConn::write() {
             // 根据Connection字段决定是否立即关闭连接
             DPRINT("[%d]Bytes sent: %d", m_sockfd, bytes_sent);
             if (bytes_remain < 0) {
-                DPRINT("!WARNING!Bytes sent not match");
+                DPRINT("!WARNING!Bytes sent not match, bytes_remain = %d", bytes_remain);
             }
             unmap();
             if (m_linger) {
@@ -375,7 +425,7 @@ bool HTTPConn::write() {
             } else {
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
                 DPRINT("[%d]Connection: close", m_sockfd);
-                return false;
+                return false;   // 在RDHUP处关闭连接
             }
         }
     }
@@ -460,6 +510,7 @@ bool HTTPConn::process_write(HTTP_CODE ret) {
                 m_iv[0].iov_len = m_write_idx;
                 m_iv[1].iov_base = m_file_address;
                 m_iv[1].iov_len = m_file_stat.st_size;
+                m_bytes_to_send = m_write_idx + m_file_stat.st_size;    // 发送字节数
                 m_iv_count = 2;
                 return true;
             } else {
@@ -476,6 +527,7 @@ bool HTTPConn::process_write(HTTP_CODE ret) {
     }
     m_iv[0].iov_base = m_write_buf;
     m_iv[0].iov_len = m_write_idx;
+    m_bytes_to_send = m_write_idx;
     m_iv_count = 1;
     return true;
 }
@@ -486,11 +538,18 @@ void HTTPConn::process() {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
+    DPRINT("Done HTTP processing\n" \
+           "METHOD = %s\n" \
+           "Linger = %s\n" \
+           "" \
+           , get_method_name(m_method).c_str(), m_linger ? "Keep-Alive" : "Close"
+    );
 
     bool write_ret = process_write(read_ret);
     if (!write_ret) {
         // 无法写入
         close_conn();
+        return;
     }
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
