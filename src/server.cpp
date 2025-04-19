@@ -1,3 +1,4 @@
+#include <openssl/ssl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -153,7 +154,11 @@ int main(int argc, char* argv[]) {
                 users[sockfd].close_conn();
             } else if (events[i].events & EPOLLIN) {
                 if (users[sockfd].read()) {
-                    pool->append(users + sockfd);
+                    if (!pool->append(users + sockfd)) {
+                        // 队列已满
+                        // 应该返回503
+                        users[sockfd].write_respond(HTTPConn::SERVICE_UNAVAILABLE, true);
+                    }
                 } else {
                     DPRINT("[%d]Read error: closing connection", sockfd);
                     users[sockfd].close_conn();

@@ -7,3 +7,14 @@
 misc/
 obj/
 bin/
+webbench/
+
+# binary output
+*.o
+*.lo
+*.a
+*.la
+.libs
+.deps
+
+3rdparty/

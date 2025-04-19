@@ -46,9 +46,11 @@ public:
     enum HTTP_CODE {
         NO_REQUEST, GET_REQUEST, BAD_REQUEST, 
         NO_RESOURCE, FILE_REQUEST, FORBIDDEN_REQUEST, 
-        INTERNAL_ERROR, CLOSED_CONNECTION
+        INTERNAL_ERROR, SERVICE_UNAVAILABLE, CLOSED_CONNECTION
     };
-    
+    enum HTTP_VERSION {
+        HTTP1_0 = 0, HTTP1_1, HTTP2_0, HTTP_UNSUPPORTED
+    };
     HTTPConn() {}
     ~HTTPConn() {}
 
@@ -58,6 +60,8 @@ public:
     void process();
     bool read();
     bool write();
+
+    void write_respond(HTTP_CODE code, bool send_and_exit);
 
 private:
     // 初始化连接
@@ -105,6 +109,7 @@ private:
     char m_real_file[FILENAME_LEN];
     char* m_url;
     char* m_version;
+    HTTP_VERSION m_http_ver;
     char* m_host;
     int m_content_length;
     bool m_linger;

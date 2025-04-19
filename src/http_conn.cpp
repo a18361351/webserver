@@ -31,6 +31,9 @@ const char* ERROR_404_TITLE = "Not Found";
 const char* ERROR_404_FORM = "The requested file was not found on this server.\n";
 const char* ERROR_500_TITLE = "Internal Server Error";
 const char* ERROR_500_FORM = "There was an unusual problem serving the requested file.\n";
+const char* ERROR_503_TITLE = "Service Unavailable";
+const char* ERROR_503_FORM = "The server is currently too busy to process request.\n";
+
 /* 网站的根目录 */
 const char* DOC_ROOT = "/var/www/html";
 
@@ -235,8 +238,14 @@ HTTPConn::HTTP_CODE HTTPConn::parse_requestline(char* text) {
     }
     *m_version++ = '\0';
     m_version += strspn(m_version, " \t");
-    if (strcasecmp(m_version, "HTTP/1.1") != 0) {
-        // 版本不匹配
+    if (strcasecmp(m_version, "HTTP/1.1") == 0) {
+        m_http_ver = HTTP1_1;
+    } else if (strcasecmp(m_version, "HTTP/1.0") == 0) {
+        m_http_ver = HTTP1_0;
+    } else if (strcasecmp(m_version, "HTTP/2.0") == 0) {
+        m_http_ver = HTTP2_0;
+    } else {
+        m_http_ver = HTTP_UNSUPPORTED;
         return BAD_REQUEST;
     }
 
@@ -255,6 +264,11 @@ HTTPConn::HTTP_CODE HTTPConn::parse_requestline(char* text) {
 HTTPConn::HTTP_CODE HTTPConn::parse_headers(char* text) {
     // 遇到一个空行，说明头部字段解析完毕
     if (text[0] == '\0') {
+        // HTTP规范检查：HTTP1.1强制要求Host字段
+        if (m_content_length != 0 && m_host == 0) {
+            return BAD_REQUEST;
+        }
+
         // 如果HTTP请求有消息体，则还需读取m_content_length字节的消息体，状态机转移至CHECK_STATE_CONTENT
         if (m_content_length != 0) {
             m_check_state = CHECK_STATE_CONTENT;
@@ -502,6 +516,14 @@ bool HTTPConn::process_write(HTTP_CODE ret) {
             }
             break;
         }
+        case SERVICE_UNAVAILABLE: {
+            add_status_line(503, ERROR_503_TITLE);
+            add_headers(strlen(ERROR_503_FORM));
+            if (!add_content(ERROR_503_FORM)) {
+                return false;
+            }
+            break;
+        }
         case FILE_REQUEST: {
             add_status_line(200, OK_200_TITLE);
             if (m_file_stat.st_size != 0) {
@@ -552,6 +574,19 @@ void HTTPConn::process() {
         return;
     }
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
+}
+
+void HTTPConn::write_respond(HTTPConn::HTTP_CODE code, bool send_and_exit) {
+    bool write_ret = process_write(code);
+    if (!write_ret) {
+        // 无法写入
+        close_conn();
+        return;
+    }
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
+    if (send_and_exit && m_linger) {
+        m_linger = false;
+    }
 }
 
 void HTTPConn::unmap(){
