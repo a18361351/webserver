@@ -76,7 +76,7 @@ int main(int argc, char* argv[]) {
 
     ThreadPool<HTTPConn>* pool = nullptr;
     try {
-        pool = new ThreadPool<HTTPConn>(8);
+        pool = new ThreadPool<HTTPConn>();
     } catch (...) {
         DPRINT("Unable to init thread pool.");
         return 1;

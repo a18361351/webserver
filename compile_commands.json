@@ -3,6 +3,7 @@
     "arguments": [
       "/usr/bin/g++",
       "-Iinc",
+      "-I/usr/local/boost_1_82_0",
       "-Wall",
       "-Wextra",
       "-g",
