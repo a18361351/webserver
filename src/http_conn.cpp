@@ -65,7 +65,10 @@ std::string get_method_name(HTTPConn::METHOD method) {
 int setnonblocking(int fd) {
     int old_option = fcntl(fd, F_GETFL);
     int new_option = old_option | O_NONBLOCK;
-    fcntl(fd, F_SETFL, new_option);
+    if (fcntl(fd, F_SETFL, new_option) == -1) {
+        perror("setnonblocking() > fcntl error");
+        exit(-1);
+    }
     return old_option;
 }
 
@@ -83,8 +86,8 @@ void addfd(int epollfd, int fd, bool oneshot, int trig_mode = 1) {
     if (oneshot) {
         e.events |= EPOLLONESHOT;
     }
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &e);
     setnonblocking(fd);
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &e);
 }
 
 void removefd(int epollfd, int fd) {
@@ -100,14 +103,15 @@ void modfd(int epollfd, int fd, int ev) {
 }
 
 int HTTPConn::m_user_count = 0;
-int HTTPConn::m_epollfd = -1;
+// int HTTPConn::m_epollfd = -1;
 
 void HTTPConn::close_conn(bool real_close) {
     if (real_close && (m_sockfd != -1)) {
-        DPRINT("[%d]Socket closed", m_sockfd);
-        removefd(m_epollfd, m_sockfd);
+        int closing_fd = m_sockfd;
+        DPRINT("[%d.%d]Socket closed", m_epollfd, m_sockfd);
         m_sockfd = -1;
         m_user_count--;
+        removefd(m_epollfd, closing_fd);    // removefd会close(fd)，这时候会有新的连接被分配到这个fd上，所以m_sockfd = -1不能后执行
     }
 }
 
@@ -117,16 +121,23 @@ void HTTPConn::close_conn_write() {
     }
 }
 
-void HTTPConn::init(int sockfd, const sockaddr_in& addr) {
+void HTTPConn::init(int sockfd, int epollfd, const sockaddr_in& addr) {
     m_sockfd = sockfd;
     m_address = addr;
-    addfd(m_epollfd, sockfd, true);
+    m_epollfd = epollfd;
     m_user_count++;
-
+    
     init();
+    DPRINT("sockfd = %d, epollfd = %d", sockfd, m_epollfd);
+    addfd(m_epollfd, sockfd, true); 
+    // 放在init后面，因为addfd后sub reactor（其他线程）就会开始事件监听，如果addfd放前面，
+    // 就有可能出现sub reactor线程开始处理而HTTPConn对象还没有初始化完成的情况，在单Reactor
+    // 模式下不出问题的原因是init()调用者和m_epollfd的监听者是同一线程
+
 }
 
 void HTTPConn::init() {
+    DPRINT("initialized");
     m_check_state = CHECK_STATE_REQUESTLINE;
     m_linger = false;
 
@@ -140,7 +151,7 @@ void HTTPConn::init() {
     m_end_pos = 0;
     m_write_idx = 0;
     m_bytes_to_send = 0;
-    memset(m_read_buf, 0, READ_BUFFER_SIZE);
+    memset(m_read_buf, -1, READ_BUFFER_SIZE);
     memset(m_write_buf, 0, WRITE_BUFFER_SIZE);
     memset(m_real_file, 0, FILENAME_LEN);
 }
@@ -155,6 +166,10 @@ bool HTTPConn::read() {
         while (true) {
             bytes_read = recv(m_sockfd, m_read_buf + m_end_pos, READ_BUFFER_SIZE - m_end_pos, 0);
             bytes_read_total += bytes_read == -1 ? 0 : bytes_read;
+            if (bytes_read_total > 0) {
+                assert(m_read_buf[0] != -1);    // temporary assert
+            }
+            DPRINT("[%d.%d]Recv %d bytes", m_epollfd, m_sockfd, bytes_read);
             if (bytes_read == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     break; // 正常结束循环
@@ -163,13 +178,13 @@ bool HTTPConn::read() {
                 return false;   // error
             } else if (bytes_read == 0) {
                 // 远端计算机关闭连接
-                DPRINT("[%d]Remote client closed", this->m_sockfd);
-                DPRINT("[%d]Read %d bytes", m_sockfd, bytes_read_total);
+                DPRINT("[%d.%d]Remote client closed", m_epollfd, m_sockfd);
+                DPRINT("[%d.%d]Read %d bytes, addr=%lu", m_epollfd, m_sockfd, bytes_read_total, (ulong)m_read_buf);
                 return false;
             }
             m_end_pos += bytes_read;
         }
-        DPRINT("[%d]Read %d bytes", m_sockfd, bytes_read_total);
+        DPRINT("[%d.%d]Read %d bytes, addr=%lu", m_epollfd, m_sockfd, bytes_read_total, (ulong)m_read_buf);
         return true;
     
 }
@@ -418,7 +433,7 @@ bool HTTPConn::write() {
                 modfd(m_epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
-            DPRINT("[%d]Write error: %s", m_sockfd, strerror(errno));
+            DPRINT("[%d.%d]Write error: %s", m_epollfd, m_sockfd, strerror(errno));
             unmap();
             return false;
         }
@@ -427,7 +442,7 @@ bool HTTPConn::write() {
 
         if (bytes_remain <= 0) {
             // 根据Connection字段决定是否立即关闭连接
-            DPRINT("[%d]Bytes sent: %d", m_sockfd, bytes_sent);
+            DPRINT("[%d.%d]Bytes sent: %d", m_epollfd, m_sockfd, bytes_sent);
             if (bytes_remain < 0) {
                 DPRINT("!WARNING!Bytes sent not match, bytes_remain = %d", bytes_remain);
             }
@@ -438,7 +453,7 @@ bool HTTPConn::write() {
                 return true;
             } else {
                 modfd(m_epollfd, m_sockfd, EPOLLIN);
-                DPRINT("[%d]Connection: close", m_sockfd);
+                DPRINT("[%d.%d]Connection: close", m_epollfd, m_sockfd);
                 return false;   // 在RDHUP处关闭连接
             }
         }
@@ -555,16 +570,18 @@ bool HTTPConn::process_write(HTTP_CODE ret) {
 }
 
 void HTTPConn::process() {
+    DPRINT("[%d.%d]Processing", m_epollfd, m_sockfd);
     HTTP_CODE read_ret = process_read();
     if (read_ret == NO_REQUEST) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
+        DPRINT("[%d.%d]Process not complete", m_epollfd, m_sockfd);
         return;
     }
-    DPRINT("Done HTTP processing\n" \
+    DPRINT("[%d.%d]Done HTTP processing\n" \
            "METHOD = %s\n" \
            "Linger = %s\n" \
            "" \
-           , get_method_name(m_method).c_str(), m_linger ? "Keep-Alive" : "Close"
+           , m_epollfd, m_sockfd, get_method_name(m_method).c_str(), m_linger ? "Keep-Alive" : "Close"
     );
 
     bool write_ret = process_write(read_ret);

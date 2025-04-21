@@ -19,10 +19,13 @@
 
 
 // #define USE_LOCKFREE_QUEUE
-#define USE_BOOST_LOCKFREE_QUEUE
+// #define USE_BOOST_LOCKFREE_QUEUE
 
 #ifdef USE_LOCKFREE_QUEUE
 #include "lockfree.h"
+#elif defined (USE_BOOST_LOCKFREE_QUEUE)
+#include "boost/lockfree/policies.hpp"
+#include "boost/lockfree/queue.hpp"
 #endif
 
 
@@ -32,7 +35,7 @@ template <typename T> class ThreadPool {
     ThreadPool* instance;
   };
 public:
-  ThreadPool(int thread_number = 1, int max_requests = 1000);
+  ThreadPool(int thread_number = 8, int max_requests = 1000);
   ~ThreadPool();
   // 向请求队列中添加任务
   bool append(T *request);
@@ -53,6 +56,8 @@ private:
   std::vector<sem> m_lf_queuestat;
   std::vector<
   LockFreeQueue_SPSC<T*>> m_lockfree_workq_set; // 无锁队列
+#elif defined (USE_BOOST_LOCKFREE_QUEUE)
+  boost::lockfree::queue<T*, boost::lockfree::fixed_sized<true>> m_lockfree_workqueue;  // Boost库无锁队列 
 #endif  // USE_LOCKFREE_QUEUE
 };
 
@@ -63,6 +68,8 @@ ThreadPool<T>::ThreadPool(int thread_number, int max_requests)
 #ifdef USE_LOCKFREE_QUEUE
        , m_lockfree_workq_set(thread_number) // empty
        , m_lf_queuestat(thread_number)
+#elif defined (USE_BOOST_LOCKFREE_QUEUE)
+      , m_lockfree_workqueue(max_requests)  // 队列最大长度
 #endif  // USE_LOCKFREE_QUEUE
       {
   if ((thread_number <= 0) || (max_requests <= 0)) {
@@ -115,6 +122,24 @@ template <typename T> void ThreadPool<T>::run(int thread_id) {
   while (m_running) {
     m_lf_queuestat[thread_id].wait();
     if (m_lockfree_workq_set[thread_id].pop(request)) {
+      request->process();
+    }
+  }
+}
+#elif defined (USE_BOOST_LOCKFREE_QUEUE)
+template <typename T> bool ThreadPool<T>::append(T *request) {
+  bool ret = m_lockfree_workqueue.push(request);
+  if (ret) {
+    m_queuestat.post();
+  }
+  return ret;
+}
+
+template <typename T> void ThreadPool<T>::run([[maybe_unused]]int thread_id) {
+  T *request = nullptr;
+  while (m_running) {
+    m_queuestat.wait();
+    if (m_lockfree_workqueue.pop(request)) {
       request->process();
     }
   }

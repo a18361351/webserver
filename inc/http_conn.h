@@ -54,7 +54,7 @@ public:
     HTTPConn() {}
     ~HTTPConn() {}
 
-    void init(int sockfd, const sockaddr_in& addr);
+    void init(int sockfd, int epollfd, const sockaddr_in& addr);
     void close_conn(bool real_close = true);
     void close_conn_write();
     void process();
@@ -88,7 +88,8 @@ private:
     bool add_blank_line();
 
 public:
-    static int m_epollfd;
+    // static int m_epollfd;
+    int m_epollfd;  // 每个user对应的epollfd可能不同了
     static int m_user_count;
 
 private:
