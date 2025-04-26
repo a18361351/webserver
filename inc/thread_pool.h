@@ -64,7 +64,7 @@ private:
 template <typename T>
 ThreadPool<T>::ThreadPool(int thread_number, int max_requests)
     : m_thread_number(thread_number), m_max_requests(max_requests),
-      m_running(true), m_threads(NULL) 
+    m_threads(NULL), m_running(true)
 #ifdef USE_LOCKFREE_QUEUE
        , m_lockfree_workq_set(thread_number) // empty
        , m_lf_queuestat(thread_number)

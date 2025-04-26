@@ -1,5 +1,4 @@
 #include <exception>
-#include <openssl/ssl.h>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -16,7 +15,7 @@
 #include "thread_pool.h"
 #include "http_conn.h"
 
-// #define DEBUG_PRINT
+#define DEBUG_PRINT
 
 #ifdef DEBUG_PRINT
 #define DPRINT(fmt, ...) \
@@ -32,14 +31,25 @@
 #endif
 
 
-#define MAX_FD 65536
-#define MAX_EVENT_NUMBER 1024
+constexpr int MAX_FD = 65536;
+constexpr int MAX_EVENT_NUMBER = 1024;
 
-constexpr int sub_reactors = 1;
-constexpr int worker_threads = 1;
+constexpr int SUB_REACTORS = 1;
+constexpr int WORKER_THREADS = 1;
 
-extern void addfd(int epollfd, int fd, bool oneshot, int trig_mode = 1);
+extern void addfd(int epollfd, int fd, bool oneshot, int trig_mode = 1);    // 自动non-block
 extern int removefd(int epollfd, int fd);
+extern int setnonblocking(int fd);
+
+int pipefd[2];  // 1写端0读端
+
+// signal handler
+void sig_handler(int sigid) {
+    int last_errno = errno;
+    printf("sigid = %d\n", sigid);
+    send(pipefd[1], (char*)&sigid, 1, 0);   // 信号写入管道，让主线程处理
+    errno = last_errno;
+}
 
 void addsig(int sig, void(handler)(int), bool restart = true) {
     struct sigaction sa;
@@ -50,6 +60,20 @@ void addsig(int sig, void(handler)(int), bool restart = true) {
     }
     sigfillset(&sa.sa_mask);
     assert(sigaction(sig, &sa, NULL) != -1);
+}
+
+void init_signal() {
+    // SIGINT, SIGTERM交给主线程进行处理，SIGPIPE忽略
+    addsig(SIGPIPE, SIG_IGN);   // SIGPIPE忽略
+    addsig(SIGINT, sig_handler);
+    addsig(SIGTERM, sig_handler);
+
+    // pipe(pipefd);   // 创建管道
+    int ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
+    assert(ret != -1);
+    setnonblocking(pipefd[1]);
+
+
 }
 
 void show_error(int connfd, const char* info) {
@@ -64,7 +88,7 @@ struct Context {
     HTTPConn* users;
     int epollfd;
     int listener;
-    int sub_reactors_epollfd[sub_reactors];
+    int sub_reactors_epollfd[SUB_REACTORS];
 };
 
 // main reactor
@@ -104,14 +128,35 @@ void* main_reactor([[maybe_unused]]void* arg) {
                     // users[connfd].init(connfd, sub_epollfd, cli_addr);
                     users[connfd].init(connfd, ctx.sub_reactors_epollfd[rr_counter], cli_addr);
                     DPRINT("Dispatch connection fd = %d -> subreactor epollfd = %d", connfd, ctx.sub_reactors_epollfd[rr_counter]);
-                    rr_counter = (rr_counter + 1) % sub_reactors;
+                    rr_counter = (rr_counter + 1) % SUB_REACTORS;
+                }
+            } else if ((sockfd == pipefd[0]) && (events[i].events & EPOLLIN)) {
+                while (true) {
+                    DPRINT("signal process");
+                    char signals[255];
+                    int ret = recv(pipefd[0], signals, sizeof(signals), 0);
+                    if (ret <= 0) {
+                        break;
+                    }
+                    for (int j = 0; j < ret; j++) {
+                        switch (signals[j]) {
+                            case SIGINT:
+                            case SIGTERM:
+                                DPRINT("SIGINT/SIGTERM received");
+                                printf("Quitting\n");
+                                // 清除工作
+                                return 0;
+                            default:
+                                break;
+                        }
+                    }
                 }
             } else {
-                // 按理来说表中只可能有一个sockfd
-                throw std::logic_error("Main reactor should only have listenfd");
+                // do nothing
             }
         }
     }
+    return 0;
 }
 
 // sub reactor
@@ -152,6 +197,7 @@ void* sub_reactor(void* arg) {
                     users[sockfd].close_conn();
                 }
             } else if (events[i].events & EPOLLOUT) {
+                // 写socket
                 if (!users[sockfd].write()) {
                     DPRINT("[%d.%d]Write done: closing connection", epollfd, sockfd);
                     // users[sockfd].close_conn();
@@ -162,6 +208,7 @@ void* sub_reactor(void* arg) {
             }
         }
     }
+    return 0;
 }
 
 int main(int argc, char* argv[]) {
@@ -183,15 +230,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    addsig(SIGPIPE, SIG_IGN);
-
+    // 初始化信号处理
+    init_signal();
     
     // Context上下文类型创建
     Context ctx;
     
     // 线程池创建
     try {
-        ctx.pool = new ThreadPool<HTTPConn>(worker_threads);
+        ctx.pool = new ThreadPool<HTTPConn>(WORKER_THREADS);
     } catch (...) {
         DPRINT("Unable to init thread pool.");
         exit(-1);
@@ -203,12 +250,22 @@ int main(int argc, char* argv[]) {
     assert(ctx.users);
     // int user_count = 0;
 
-    // listener初始化+监听
+    // listener初始化
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd >= 0);
+
+    // SO_LINGER参数：设置套接字关闭时的行为
+    //  l_onoff int: 0表示执行正常的close操作，发送fin报文
+    //               1，分为l_linger==0和l_linger>0两种情况：
+    //                  l_linger==0，表示释放RST资源，发送RST报文，不经过TIME_WAIT状态
+    //                  l_linger==1，close()操作会进行阻塞，直到超时或所有缓冲区数据发送完，发送FIN并得到对方的ACK
+    //  l_linger int: 超时时间，单位秒
+    //               
     struct linger tmp = {1, 0};
-    int reuse = 1;
     assert(setsockopt(listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof(tmp)) >= 0);
+
+    // SO_REUSEADDR参数：允许新的套接字立即绑定到相同的地址和端口，即使之前的套接字仍处于TIME_WAIT状态
+    int reuse = 1;
     assert(setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) >= 0);
 
     int ret = 0;
@@ -231,10 +288,10 @@ int main(int argc, char* argv[]) {
     ctx.listener = listenfd;
 
     // sub reactors初始化
-    int sub_epollfds[sub_reactors] = {-1};
-    pthread_t sub_reactor_threads[sub_reactors];
-    Context sub_ctx[sub_reactors];
-    for (int i = 0; i < sub_reactors; i++) {
+    int sub_epollfds[SUB_REACTORS] = {-1};
+    pthread_t sub_reactor_threads[SUB_REACTORS];
+    Context sub_ctx[SUB_REACTORS];
+    for (int i = 0; i < SUB_REACTORS; i++) {
         sub_epollfds[i] = epoll_create(65535);  // size parameter is unused!
         // sub reactor上下文初始化
         sub_ctx[i] = ctx;
@@ -255,15 +312,19 @@ int main(int argc, char* argv[]) {
     int epollfd = epoll_create(65535);
     assert(epollfd != -1);
     addfd(epollfd, listenfd, false);
+    addfd(epollfd, pipefd[0], false);
     ctx.epollfd = epollfd;
-    for (int i = 0; i < sub_reactors; i++) {
+    for (int i = 0; i < SUB_REACTORS; i++) {
         ctx.sub_reactors_epollfd[i] = sub_epollfds[i];
     }
 
     main_reactor(&ctx);
 
     DPRINT("Cleanup");
-    // TODO: 更完善的Cleanup
+    // Cleanup
+    for (int i = 0; i < SUB_REACTORS; i++) {
+        close(sub_epollfds[i]);
+    }
     close(epollfd);
     close(listenfd);
     delete[] ctx.users;
