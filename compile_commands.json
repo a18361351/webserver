@@ -8,6 +8,26 @@
       "-Wextra",
       "-g",
       "-pthread",
+      "-std=c++17",
+      "-c",
+      "-o",
+      "obj/http_conn.o",
+      "src/http_conn.cpp"
+    ],
+    "directory": "/home/lance/sources/webserver",
+    "file": "/home/lance/sources/webserver/src/http_conn.cpp",
+    "output": "/home/lance/sources/webserver/obj/http_conn.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-Iinc",
+      "-I/usr/local/boost_1_82_0",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-pthread",
+      "-std=c++17",
       "-c",
       "-o",
       "obj/server.o",
@@ -16,5 +36,24 @@
     "directory": "/home/lance/sources/webserver",
     "file": "/home/lance/sources/webserver/src/server.cpp",
     "output": "/home/lance/sources/webserver/obj/server.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-Iinc",
+      "-I/usr/local/boost_1_82_0",
+      "-Wall",
+      "-Wextra",
+      "-g",
+      "-pthread",
+      "-std=c++17",
+      "-c",
+      "-o",
+      "obj/config.o",
+      "src/config.cpp"
+    ],
+    "directory": "/home/lance/sources/webserver",
+    "file": "/home/lance/sources/webserver/src/config.cpp",
+    "output": "/home/lance/sources/webserver/obj/config.o"
   }
 ]

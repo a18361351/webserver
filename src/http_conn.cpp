@@ -4,8 +4,9 @@
 #include <strings.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/sendfile.h>
 
-// Rewrite in 4/5
+#include "config.h"
 
 // #define DEBUG_PRINT
 
@@ -36,6 +37,8 @@ const char* ERROR_503_FORM = "The server is currently too busy to process reques
 
 /* 网站的根目录 */
 const char* DOC_ROOT = "/var/www/html";
+
+extern Config cfg;
 
 std::string get_method_name(HTTPConn::METHOD method) {
     switch (method) {
@@ -110,6 +113,9 @@ void HTTPConn::close_conn(bool real_close) {
         int closing_fd = m_sockfd;
         DPRINT("[%d.%d]Socket closed", m_epollfd, m_sockfd);
         m_sockfd = -1;
+
+        unmap();
+
         m_user_count--;
         removefd(m_epollfd, closing_fd);    // removefd会close(fd)，这时候会有新的连接被分配到这个fd上，所以m_sockfd = -1不能后执行
     }
@@ -151,7 +157,10 @@ void HTTPConn::init() {
     m_end_pos = 0;
     m_write_idx = 0;
     m_bytes_to_send = 0;
-    memset(m_read_buf, -1, READ_BUFFER_SIZE);
+    m_bytes_sent = 0;
+    m_filefd = -1;
+    m_file_address = 0;
+    memset(m_read_buf, 0, READ_BUFFER_SIZE);
     memset(m_write_buf, 0, WRITE_BUFFER_SIZE);
     memset(m_real_file, 0, FILENAME_LEN);
 }
@@ -166,9 +175,6 @@ bool HTTPConn::read() {
         while (true) {
             bytes_read = recv(m_sockfd, m_read_buf + m_end_pos, READ_BUFFER_SIZE - m_end_pos, 0);
             bytes_read_total += bytes_read == -1 ? 0 : bytes_read;
-            if (bytes_read_total > 0) {
-                assert(m_read_buf[0] != -1);    // temporary assert
-            }
             DPRINT("[%d.%d]Recv %d bytes", m_epollfd, m_sockfd, bytes_read);
             if (bytes_read == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -409,24 +415,39 @@ HTTPConn::HTTP_CODE HTTPConn::do_request() {
         return BAD_REQUEST;
     }
     int fd = open(m_real_file, O_RDONLY);
-    m_file_address = (char*)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    return FILE_REQUEST;
+    // sendfile优化
+    if (cfg.use_sendfile) {
+        // sendfile
+        m_filefd = fd;
+        return FILE_REQUEST;
+    } else {
+        // mmap+writev
+        m_file_address = (char*)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        return FILE_REQUEST;
+    }
 }
 
 bool HTTPConn::write() {
     int temp = 0;
-    int bytes_sent = 0;
-    int bytes_remain = m_bytes_to_send;
-    m_bytes_to_send = 0;
-    if (bytes_remain == 0) {
+    int bytes_sent = 0; // 当前发送字节
+    if (m_bytes_to_send == 0) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         init();
         return true;
     }
 
     while (1) {
-        temp = writev(m_sockfd, m_iv, m_iv_count);
+        if (cfg.use_sendfile) {
+            if (m_iv_count > 0) {
+                temp = writev(m_sockfd, m_iv, m_iv_count);
+            } else {
+                temp = sendfile(m_sockfd, m_filefd, nullptr, m_file_stat.st_size);
+            }
+        } else {
+            temp = writev(m_sockfd, m_iv, m_iv_count);
+        }
+        // send failed
         if (temp < 0) {
             if (errno == EAGAIN) {
                 // 没有缓冲区空间，等待下一轮事件
@@ -435,16 +456,42 @@ bool HTTPConn::write() {
             }
             DPRINT("[%d.%d]Write error: %s", m_epollfd, m_sockfd, strerror(errno));
             unmap();
+            modfd(m_epollfd, m_sockfd, EPOLLIN);   // RDHUP
+            return false;
+        } else if (temp == 0) {
+            unmap();
+            modfd(m_epollfd, m_sockfd, EPOLLIN); 
             return false;
         }
         bytes_sent += temp;
-        bytes_remain -= temp;
+        m_bytes_to_send -= temp;
 
-        if (bytes_remain <= 0) {
+        // iovec adjust
+        if (temp > 0) {
+            int i = 0;
+            while (temp > 0 && i < m_iv_count) {
+                if (m_iv[i].iov_len > (size_t)temp) {
+                    m_iv[i].iov_len -= temp;
+                    m_iv[i].iov_base = (char*)m_iv[i].iov_base + temp;
+                    temp = 0;
+                } else {
+                    temp -= m_iv[i].iov_len;
+                    i++;
+                }
+            }
+            if (i > 0) {
+                for (int j = i; j < m_iv_count; j++) {
+                    m_iv[j - i] = m_iv[j];
+                }
+                m_iv_count -= i;
+            }
+        }
+
+        if (m_bytes_to_send <= 0) {
             // 根据Connection字段决定是否立即关闭连接
             DPRINT("[%d.%d]Bytes sent: %d", m_epollfd, m_sockfd, bytes_sent);
-            if (bytes_remain < 0) {
-                DPRINT("!WARNING!Bytes sent not match, bytes_remain = %d", bytes_remain);
+            if (m_bytes_to_send < 0) {
+                DPRINT("!WARNING!Bytes sent not match, bytes_remain = %d", m_bytes_to_send);
             }
             unmap();
             if (m_linger) {
@@ -545,10 +592,14 @@ bool HTTPConn::process_write(HTTP_CODE ret) {
                 add_headers(m_file_stat.st_size);
                 m_iv[0].iov_base = m_write_buf;
                 m_iv[0].iov_len = m_write_idx;
-                m_iv[1].iov_base = m_file_address;
-                m_iv[1].iov_len = m_file_stat.st_size;
+                if (cfg.use_sendfile) {
+                    m_iv_count = 1;
+                } else {
+                    m_iv[1].iov_base = m_file_address;
+                    m_iv[1].iov_len = m_file_stat.st_size;
+                    m_iv_count = 2;
+                }
                 m_bytes_to_send = m_write_idx + m_file_stat.st_size;    // 发送字节数
-                m_iv_count = 2;
                 return true;
             } else {
                 const char* OK_STR = "<html><body></body></html>";
@@ -607,8 +658,16 @@ void HTTPConn::write_respond(HTTPConn::HTTP_CODE code, bool send_and_exit) {
 }
 
 void HTTPConn::unmap(){
-    if (m_file_address) {
-        munmap(m_file_address, m_file_stat.st_size);
-        m_file_address = 0;
+    if (cfg.use_sendfile) {
+        if (m_filefd != -1) {
+            int tmp = m_filefd;
+            m_filefd = -1;
+            close(tmp);
+        }
+    } else {
+        if (m_file_address) {
+            munmap(m_file_address, m_file_stat.st_size);
+            m_file_address = 0;
+        }
     }
 }

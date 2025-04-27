@@ -115,11 +115,17 @@ private:
     int m_content_length;
     bool m_linger;
 
+    // mmap+writev
     char* m_file_address;
     struct stat m_file_stat;
-    // 使用writev来执行写操作
+    // sendfile
+    int m_filefd;
+
     struct iovec m_iv[2];
     int m_iv_count;
+
+    // 已传输数据
+    uint m_bytes_sent;
 };
 
 #endif

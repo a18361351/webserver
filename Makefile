@@ -1,7 +1,7 @@
 # 编译器设置
 CXX := g++
 CXX_INC := -Iinc -I/usr/local/boost_1_82_0
-CXXFLAGS := $(CXX_INC) -Wall -Wextra -g -MMD -pthread
+CXXFLAGS := $(CXX_INC) -Wall -Wextra -g -MMD -pthread -std=c++17
 LDFLAGS := -pthread
 
 # 文件路径设置
@@ -14,7 +14,8 @@ TARGET_PATH := $(BIN_DIR)/$(TARGET)  # 完整路径
 # 源文件列表（明确指定）
 SRCS := \
 	$(SRC_DIR)/http_conn.cpp \
-	$(SRC_DIR)/server.cpp
+	$(SRC_DIR)/server.cpp \
+	$(SRC_DIR)/config.cpp
 
 # 生成对应的目标文件列表
 OBJS := $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SRCS))
