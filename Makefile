@@ -1,7 +1,7 @@
 # 编译器设置
 CXX := g++
 CXX_INC := -Iinc -I/usr/local/boost_1_82_0
-CXXFLAGS := $(CXX_INC) -Wall -Wextra -g -MMD -pthread -std=c++17
+CXXFLAGS := $(CXX_INC) -Wall -Wextra -g -MMD -pthread -std=c++11
 LDFLAGS := -pthread
 
 # 文件路径设置

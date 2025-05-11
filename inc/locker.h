@@ -1,5 +1,5 @@
-#ifndef LOCKER_H
-#define LOCKER_H
+#ifndef LOCKER_HEADER
+#define LOCKER_HEADER
 // 线程同步机制包装类
 // 包含信号量、互斥体和条件变量
 

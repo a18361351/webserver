@@ -169,7 +169,7 @@ bool HTTPConn::read() {
         if (m_end_pos >= READ_BUFFER_SIZE) {
             return false;
         }
-        int bytes_read_total = 0;
+        [[maybe_unused]]int bytes_read_total = 0;
         int bytes_read = 0;
     
         while (true) {
@@ -430,7 +430,7 @@ HTTPConn::HTTP_CODE HTTPConn::do_request() {
 
 bool HTTPConn::write() {
     int temp = 0;
-    int bytes_sent = 0; // 当前发送字节
+    [[maybe_unused]]int bytes_sent = 0; // 当前发送字节
     if (m_bytes_to_send == 0) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         init();
